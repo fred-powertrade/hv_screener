@@ -122,6 +122,13 @@ def get_crypto_data(symbol: str, interval: str = "1d", start_time: int | None = 
     """
     Fetch historical OHLCV data for a given symbol from Binance.
 
+    This helper contacts Binance's public REST API to retrieve candlestick
+    information.  To maximise compatibility with Streamlit Community Cloud (which
+    restricts calls to ``api.binance.com``【804757919967632†L58-L96】), the function uses the
+    ``data.binance.com`` domain.  If you deploy this app in an environment
+    without such restrictions, you can revert to ``api.binance.com`` by
+    changing the ``base_url`` variable.
+
     Parameters
     ----------
     symbol : str
@@ -145,7 +152,8 @@ def get_crypto_data(symbol: str, interval: str = "1d", start_time: int | None = 
     This function is cached to avoid repeated calls.  If the Binance API
     returns an error or no data, an empty DataFrame is returned instead.
     """
-    base_url = "https://api.binance.com/api/v3/klines"
+    # Use the data.binance.com endpoint to avoid 403 errors on Streamlit Cloud
+    base_url = "https://data.binance.com/api/v3/klines"
     params: dict[str, int | str] = {
         'symbol': symbol,
         'interval': interval,
@@ -181,13 +189,19 @@ def get_crypto_data(symbol: str, interval: str = "1d", start_time: int | None = 
 def get_spot_price(symbol: str) -> float | None:
     """Get the latest spot price for a symbol from Binance.
 
+    To increase the likelihood of success on Streamlit Cloud, this function
+    queries the ``data.binance.com`` domain rather than ``api.binance.com``.
+    See the discussion on the Streamlit forums regarding 403 errors【804757919967632†L58-L96】
+    for more context.  If your environment permits, you can switch back to
+    ``api.binance.com`` by altering the URL below.
+
     Returns ``None`` if the price cannot be fetched.
     """
-    url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
+    url = f"https://data.binance.com/api/v3/ticker/price?symbol={symbol}"
     try:
         response = requests.get(url)
         if response.status_code == 200:
-            return float(response.json()['price'])
+            return float(response.json().get('price', 'nan'))
         else:
             return None
     except Exception:
