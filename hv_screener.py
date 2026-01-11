@@ -152,8 +152,58 @@ def get_crypto_data(symbol: str, interval: str = "1d", start_time: int | None = 
     This function is cached to avoid repeated calls.  If the Binance API
     returns an error or no data, an empty DataFrame is returned instead.
     """
-    # Use the data.binance.com endpoint to avoid 403 errors on Streamlit Cloud
-    base_url = "https://data.binance.com/api/v3/klines"
+    # Try a list of public endpoints in order of preference.  Some deployment
+    # environments (e.g. Streamlit Community Cloud) block requests to
+    # ``api.binance.com`` which leads to HTTP 403 errors.  To maximise the
+    # chance of a successful response, we iterate through alternative base
+    # endpoints until a call succeeds.  These endpoints all serve identical
+    # public market data【311191409717881†L39-L71】.  See the Streamlit forum thread for
+    # details【804757919967632†L58-L96】.
+    base_endpoints = [
+        "https://data.binance.com",
+        "https://api.binance.us",
+        "https://api.binance.com",
+        "https://api-gcp.binance.com",
+        "https://api1.binance.com",
+        "https://api2.binance.com",
+        "https://api3.binance.com",
+        "https://api4.binance.com",
+    ]
+    # iterate over endpoints until one returns data
+    data = None
+    for base in base_endpoints:
+        try:
+            url = f"{base}/api/v3/klines"
+            params: dict[str, int | str] = {
+                'symbol': symbol,
+                'interval': interval,
+                'limit': limit,
+            }
+            if start_time is not None:
+                params['startTime'] = int(start_time)
+            if end_time is not None:
+                params['endTime'] = int(end_time)
+            resp = requests.get(url, params=params)
+            if resp.status_code == 200:
+                potential = resp.json()
+                if potential:
+                    data = potential
+                    break
+        except Exception:
+            continue
+    if not data:
+        return pd.DataFrame()
+    df = pd.DataFrame(
+        data,
+        columns=[
+            'timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time',
+            'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume',
+            'taker_buy_quote_asset_volume', 'ignore'
+        ],
+    )
+    df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+    df = df.set_index('timestamp').sort_index()
+    return df[['open', 'high', 'low', 'close', 'volume']].astype(float)
     params: dict[str, int | str] = {
         'symbol': symbol,
         'interval': interval,
@@ -197,15 +247,32 @@ def get_spot_price(symbol: str) -> float | None:
 
     Returns ``None`` if the price cannot be fetched.
     """
-    url = f"https://data.binance.com/api/v3/ticker/price?symbol={symbol}"
-    try:
-        response = requests.get(url)
-        if response.status_code == 200:
-            return float(response.json().get('price', 'nan'))
-        else:
-            return None
-    except Exception:
-        return None
+    # Cycle through multiple endpoints to mitigate 403 blocks on specific domains.
+    endpoints = [
+        "https://data.binance.com",
+        "https://api.binance.us",
+        "https://api.binance.com",
+        "https://api-gcp.binance.com",
+        "https://api1.binance.com",
+        "https://api2.binance.com",
+        "https://api3.binance.com",
+        "https://api4.binance.com",
+    ]
+    for base in endpoints:
+        url = f"{base}/api/v3/ticker/price?symbol={symbol}"
+        try:
+            response = requests.get(url)
+            if response.status_code == 200:
+                payload = response.json()
+                # response may be a dict or list
+                if isinstance(payload, dict) and 'price' in payload:
+                    try:
+                        return float(payload['price'])
+                    except (ValueError, TypeError):
+                        continue
+        except Exception:
+            continue
+    return None
 
 
 @st.cache_data(ttl=600, show_spinner=False)
