@@ -1,0 +1,128 @@
+Coin symbol,Common Name,CG API ID
+BTC,Bitcoin,bitcoin
+ETH,Etherium,ethereum
+PTF,PowerTrade Fuel,powertrade-fuel
+SOL,Solana,solana
+TKING,Tiger King Coin,tiger-king
+XRP,,ripple
+DOGE,,dogecoin
+BNB,,binancecoin
+ARB,,arbitrum
+FIL,,filecoin
+MATIC,,matic-network
+ADA,,cardano
+LINK,,chainlink
+DOT,,polkadot
+APE,,apecoin
+NEAR,,near
+LTC,,litecoin
+SHIB,,shiba-inu
+PEPE,,pepe
+MMSHIB,,shiba-inu
+MMPEPE,,pepe
+AVAX,Avalanche,avalanche-2
+INJ,,injective-protocol
+AXS,,axie-infinity
+GALA,,gala
+BCH,,bitcoin-cash
+ETC,,ethereum-classic
+WLD,,worldcoin-wld
+SUI,,sui
+TON,,the-open-network
+POL,Polygon Ecosystem Token,polygon-ecosystem-token
+TAO,Bittensor,bittensor
+ATOM,Cosmos Hub,cosmos
+AAVE,Aave,aave
+FTM,Fantom,fantom -> sonic-3
+RUNE,THORChain,thorchain
+UNI,Uniswap,uniswap
+OP,Optimism,optimism
+LDO,Lido DAO,lido-dao
+EOS,EOS,eos
+EGLD,MultiversX,elrond-erd-2
+TIA,Celestia,celestia
+FET,Artificial Superintelligence Alliance,fetch-ai
+RNDR,Render,render-token
+APT,Aptos,aptos
+ALGO,Algorand,algorand
+TRX,TRON,tron
+ICP,Internet Computer,internet-computer
+FLOKI,FLOKI,floki
+ENA,Ethena,ethena
+WIF,dogwifhat,dogwifcoin
+STX,Stacks,blockstack
+BONK,Bonk,bonk
+HBAR,Hedera,hedera-hashgraph
+AR,Arweave,arweave
+KAS,Kaspa,kaspa
+MNT,Mantle,mantle
+NOT,Notcoin,notcoin
+ONDO,Ondo,ondo-finance
+ORDI,ORDI,ordinals
+PENDLE,Pendle,pendle
+TAIKO,Taiko,taiko
+XLM,Stellar,stellar
+ZK,ZKsync,zksync
+ZRO,LayerZero,layerzero
+PYTH,Pyth Network,pyth-network
+JUP,Jupiter,jupiter-exchange-solana
+SEI,Sei,sei-network
+THETA,Theta Network,theta-token
+FLOW,Flow,flow
+PAXG,PAX Gold,pax-gold
+GRT,The Graph,the-graph
+KAMA,Kamala Horris,kamala-horris
+TRUMP,MAGA,maga
+USDM,Mountain Protocol USD,mountain-protocol-usdm
+USDY,Ondo US Dollar Yield,ondo-us-dollar-yield
+USDL,Lift Dollar,lift-dollar
+USYC,US Yield Coin (https://usyc.hashnote.com/),us-yield-coin
+1INCH,1inch,1-inch
+DOGEDUALCCY,DOGE Dual Structured Product. This is an exact duplicate of DOGE options product.,N/A
+BABYDOGE,,baby-doge-coin
+MOG,Mog Coin,mog-coin
+EIGEN,Eigenlayer,eigenlayer
+stETH,Staked ETH,
+POPCAT,Popcat,popcat
+GOAT,Goatseus Maximus,goatseus-maximus
+AXL,Axelar,axelar
+MKR,Maker,maker
+IMX,Immutable,immutable-x
+APITHREE,API3,api3
+MASA,Masa,masa-finance
+AEVO,Aevo,aevo-exchange
+AERO,Aerodrome Finance,aerodrome-finance
+MORPHO,Morpho,morpho
+VIRTUAL,Virtuals Protocol,virtual-protocol
+HYPE,Hyperliquid,hyperliquid
+HBAR,Hedera,hedera-hashgraph
+PRIME,Echelon Prime,echelon-prime
+TRUMP,Official Trump,official-trump
+ATH,Aethir,aethir
+RAY,Raydium,raydium
+MINA,Mina,mina-protocol
+TSLAx,TSLAx,tesla-xstock
+HOODx,HOODx,robinhood-xstock
+CRCLx,CRCLx,circle-xstock
+NVDAx,NVDAx,nvidia-xstock
+COINx,COINx,coinbase-xstock
+DFDVx,DFDVx,dfdv-xstock
+METAx,METAx,meta-xstock
+MSTRx,MSTRx,microstrategy-xstock
+GOOGLx,GOOGLx,alphabet-xstock
+AAPLx,AAPLx,apple-xstock
+SPYx,SPYx,sp500-xstock
+AMZNx,AMZNx,amazon-xstock
+QQQx,QQQx,nasdaq-xstock
+PUMP,PUMP,pump-fun
+XMR,Monero,monero
+ZORA,Zora,zora
+SPX,SPX6900,spx6900
+FARTCOIN,Fartcoin,fartcoin
+WLFI,WLFI,world-liberty-financial
+ASTER,ASTER,ASTER
+PENGU,PENGU,Pengu Penguins
+CRV,CRV,Curve DAO
+M,MEMECORE,MEMECORE
+LEO,LEO Token,LEO
+ZEC,ZCASH,ZCASH
