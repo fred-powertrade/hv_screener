@@ -340,6 +340,35 @@ def calculate_hv_metrics(df: pd.DataFrame, vol_windows: list[int]) -> pd.DataFra
     df['rms_vol'] = df['normalized_714'] if 'normalized_714' in df.columns else np.nan
     return df.dropna()
 
+# Helper to summarise volatility statistics
+def summarise_volatility(df: pd.DataFrame, windows: list[int]) -> pd.DataFrame:
+    """Return a DataFrame with summary statistics for each HV window.
+
+    For each window in ``windows`` this function calculates the mean,
+    median, minimum, maximum and the most recent value of the corresponding
+    ``hv_{w}`` series.  It drops any NaNs before computing statistics and
+    returns an empty DataFrame if no data are available.  The result
+    contains one row per window with columns: ``window``, ``current``,
+    ``mean``, ``median``, ``min``, ``max``.
+    """
+    rows: list[dict[str, float]] = []
+    for w in windows:
+        col = f"hv_{w}"
+        if col not in df.columns:
+            continue
+        series = df[col].dropna()
+        if series.empty:
+            continue
+        rows.append({
+            "window": w,
+            "current": float(series.iloc[-1]),
+            "mean": float(series.mean()),
+            "median": float(series.median()),
+            "min": float(series.min()),
+            "max": float(series.max()),
+        })
+    return pd.DataFrame(rows)
+
 
 def black_scholes(S: float, K: float, T: float, r: float, sigma: float,
                   option_type: str = 'call') -> tuple[float, float, float, float, float]:
@@ -608,6 +637,56 @@ if selected_display and vol_windows and start_date <= end_date:
                 if col == 'close':
                     table_df[col] = table_df[col].map(lambda x: f"{x:.4f}")
             st.dataframe(table_df, hide_index=True)
+
+        # Commentary and interpretation
+        # Compute summary statistics for the selected HV windows. These summaries
+        # provide context on where the most recent values sit relative to the
+        # series history.  The stats are presented as percentages for readability.
+        summary_df = summarise_volatility(processed_df, vol_windows)
+        with st.expander("Volatility Commentary", expanded=False):
+            st.markdown("### Interpretation & Commentary")
+            if not summary_df.empty:
+                # Prepare a copy for display with percentage formatting
+                disp = summary_df.copy()
+                for col_name in ["current", "mean", "median", "min", "max"]:
+                    disp[col_name] = (disp[col_name] * 100).map(lambda x: f"{x:.2f}%")
+                disp.rename(columns={
+                    "window": "Window (d)",
+                    "current": "Current",
+                    "mean": "Average",
+                    "median": "Median",
+                    "min": "Min",
+                    "max": "Max",
+                }, inplace=True)
+                st.table(disp)
+                # Narrative guidance: compare the current value to the historical mean and
+                # highlight whether it is above or below the average.
+                for _, row in summary_df.iterrows():
+                    w = int(row['window'])
+                    curr = row['current']
+                    avg = row['mean']
+                    if curr > avg:
+                        direction = "above"
+                    elif curr < avg:
+                        direction = "below"
+                    else:
+                        direction = "equal to"
+                    st.markdown(
+                        f"* **{w}-day HV:** The latest value is **{curr*100:.2f}%**, "
+                        f"which is {direction} the average of **{avg*100:.2f}%** over the selected period."
+                    )
+                st.markdown(
+                    "These statistics are computed from the selected date range and may differ "
+                    "from long‑term averages. Cryptocurrencies like Bitcoin have historically "
+                    "exhibited 30‑day volatility in the **30–45%** range【881212303284964†L318-L425】, "
+                    "while other assets such as gold and major equity indices tend to see much "
+                    "lower values (e.g., 13–22%)【881212303284964†L395-L415】. Recent research suggests "
+                    "that Bitcoin's 30‑day realised volatility has averaged around 51% since early "
+                    "2022 and has dipped below 40% in mid‑2025【274698950730136†L72-L84】."
+                )
+            else:
+                st.write("Summary statistics unavailable.")
+
         # Option pricer
         with st.expander("Option Pricer", expanded=False):
             current_spot = spot_price if spot_price else latest['close']
