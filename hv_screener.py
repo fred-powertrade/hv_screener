@@ -5,13 +5,6 @@ Historical Volatility Screener
 This Streamlit app allows users to screen historical volatility (HV) for a
 curated list of crypto assets. It leverages Binance's public API (Spot & Futures)
 to fetch daily candle data and computes annualised historical volatility.
-
-Key features:
-- Toggle between Spot and Perpetual Futures data.
-- Custom HV windows (e.g., 7, 14, 30 days).
-- RMS Normalised metrics (7/14 day blending).
-- Option Greeks pricer (Black-Scholes).
-- Export data to CSV.
 """
 
 import streamlit as st
@@ -20,7 +13,7 @@ import numpy as np
 import requests
 import plotly.graph_objects as go
 from scipy.stats import norm
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import time
 import os
 import io
@@ -59,10 +52,14 @@ def load_asset_list(csv_path: str) -> pd.DataFrame:
             {"Coin symbol": "DOGE", "Common Name": "Dogecoin"},
             {"Coin symbol": "PEPE", "Common Name": "Pepe"},
             {"Coin symbol": "WIF", "Common Name": "dogwifhat"},
+            {"Coin symbol": "XRP", "Common Name": "Ripple"},
+            {"Coin symbol": "BNB", "Common Name": "Binance Coin"},
         ])
     
     try:
         df = pd.read_csv(csv_path)
+        # Clean column names just in case
+        df.columns = [c.strip() for c in df.columns]
         return df.fillna("")
     except Exception as exc:
         st.error(f"Failed to load asset list: {exc}")
@@ -76,12 +73,19 @@ def build_token_options(df: pd.DataFrame) -> dict:
         return options
         
     for _, row in df.iterrows():
-        coin = str(row.get("Coin symbol", "")).strip().upper()
+        # Handle cases where column names might slightly vary
+        coin_col = next((c for c in df.columns if 'symbol' in c.lower()), None)
+        name_col = next((c for c in df.columns if 'name' in c.lower()), None)
+        
+        if not coin_col: continue
+
+        coin = str(row.get(coin_col, "")).strip().upper()
         if not coin:
             continue
-        common = str(row.get("Common Name", "")).strip()
+            
+        common = str(row.get(name_col, "")).strip() if name_col else ""
         display = f"{coin} - {common}" if common else coin
-        # Store just the coin symbol (e.g., BTC), we append USDT later based on market type
+        # Store just the coin symbol (e.g., BTC)
         options[display] = coin 
     return options
 
@@ -90,43 +94,47 @@ def build_token_options(df: pd.DataFrame) -> dict:
 # 3. DATA FETCHING UTILITIES
 # -----------------------------------------------------------------------------
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=60, show_spinner=False)
 def get_crypto_data(symbol: str, market_type: str, interval: str = "1d", 
-                    start_time: int | None = None, end_time: int | None = None, 
-                    limit: int = 1000) -> pd.DataFrame:
+                    start_time: int = None, end_time: int = None) -> pd.DataFrame:
     """
     Fetch historical OHLCV data from Binance (Spot or Futures).
     """
     # Select Endpoint based on Market Type
     if market_type == "Perpetuals":
         base_url = "https://fapi.binance.com/fapi/v1/klines"
-        # Most perps are USDT margined, symbol usually same as spot (BTCUSDT)
-        # Note: Some crazy alts might be 1000PEPEUSDT, but standard is Coin+USDT
-        trading_pair = symbol 
     else:
         base_url = "https://api.binance.com/api/v3/klines"
-        trading_pair = symbol
 
+    # Parameters
     params = {
-        'symbol': trading_pair,
+        'symbol': symbol,
         'interval': interval,
-        'limit': limit,
+        'limit': 1000 # Max limit for one call
     }
-    if start_time is not None:
-        params['startTime'] = int(start_time)
-    if end_time is not None:
-        params['endTime'] = int(end_time)
+    
+    # Only add time params if they are valid
+    if start_time:
+        params['startTime'] = start_time
+    if end_time:
+        params['endTime'] = end_time
     
     try:
-        response = requests.get(base_url, params=params)
+        # Timeout added to prevent hanging
+        response = requests.get(base_url, params=params, timeout=10)
+        
         if response.status_code != 200:
+            st.error(f"API Error ({symbol}): {response.status_code} - {response.text}")
             return pd.DataFrame()
         
         data = response.json()
+        
+        # Check if empty list returned
         if not data:
             return pd.DataFrame()
             
         # Binance returns list of lists
+        # [Open Time, Open, High, Low, Close, Volume, Close Time, ...]
         df = pd.DataFrame(
             data,
             columns=[
@@ -135,24 +143,18 @@ def get_crypto_data(symbol: str, market_type: str, interval: str = "1d",
                 'taker_buy_quote_asset_volume', 'ignore'
             ],
         )
+        # Convert timestamp (ms) to datetime
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df = df.set_index('timestamp').sort_index()
-        return df[['open', 'high', 'low', 'close', 'volume']].astype(float)
-    except Exception:
+        
+        # Ensure numeric types
+        cols_to_numeric = ['open', 'high', 'low', 'close', 'volume']
+        df[cols_to_numeric] = df[cols_to_numeric].apply(pd.to_numeric, errors='coerce')
+        
+        return df[['open', 'high', 'low', 'close', 'volume']]
+    except Exception as e:
+        st.error(f"Connection Error for {symbol}: {str(e)}")
         return pd.DataFrame()
-
-
-@st.cache_data(ttl=600, show_spinner=False)
-def get_spot_price(symbol: str) -> float | None:
-    """Get latest price (Spot API is generally reliable for reference price)."""
-    url = f"https://api.binance.com/api/v3/ticker/price?symbol={symbol}"
-    try:
-        response = requests.get(url)
-        if response.status_code == 200:
-            return float(response.json()['price'])
-        return None
-    except Exception:
-        return None
 
 
 def calculate_hv_metrics(df: pd.DataFrame, vol_windows: list[int]) -> pd.DataFrame:
@@ -161,24 +163,28 @@ def calculate_hv_metrics(df: pd.DataFrame, vol_windows: list[int]) -> pd.DataFra
         return pd.DataFrame()
     
     df = df.copy()
-    # Log Returns
+    # Log Returns: ln(Pt / Pt-1)
     df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
     
-    # Crypto trades 365 days a year
+    # Annualisation Factor: sqrt(365) for crypto
     annual_factor = np.sqrt(365)
     
     for w in vol_windows:
-        if len(df) >= w:
-            df[f'hv_{w}'] = df['log_ret'].rolling(window=w).std() * annual_factor
+        # Require at least w observations
+        df[f'hv_{w}'] = df['log_ret'].rolling(window=w).std() * annual_factor
             
     # RMS Normalised Metrics (The "Secret Sauce")
+    # Formula: sqrt( (hv7^2 + hv14^2) / 2 )
     if 7 in vol_windows and 14 in vol_windows:
         df['normalized_714'] = np.sqrt((df['hv_7']**2 + df['hv_14']**2) / 2)
-        # Use this as the main "RMS Vol" for the UI
         df['rms_vol'] = df['normalized_714']
     elif 'rms_vol' not in df.columns:
-         # Fallback if 7/14 not selected
-        df['rms_vol'] = np.nan
+        # Fallback: if 7/14 not available, use the first window available as "vol"
+        first_window = vol_windows[0] if vol_windows else 7
+        if f'hv_{first_window}' in df.columns:
+            df['rms_vol'] = df[f'hv_{first_window}']
+        else:
+            df['rms_vol'] = np.nan
         
     return df.dropna()
 
@@ -197,7 +203,7 @@ def black_scholes(S, K, T, r, sigma, option_type='call'):
         term1 = - (S * norm.pdf(d1) * sigma) / (2 * np.sqrt(T))
         term2 = - r * K * np.exp(-r * T) * norm.cdf(d2)
         theta = (term1 + term2) / 365
-    else:
+    else: # put
         price = K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
         delta = norm.cdf(d1) - 1
         term1 = - (S * norm.pdf(d1) * sigma) / (2 * np.sqrt(T))
@@ -229,14 +235,13 @@ with st.sidebar:
         st.warning("No assets found in asset list.csv")
     else:
         # Filter keys for default selection
-        default_tokens = [k for k in token_options.keys() if k.startswith("BTC") or k.startswith("ETH")]
-        if not default_tokens and token_options:
-            default_tokens = [list(token_options.keys())[0]]
+        default_keys = [k for k in token_options.keys() if "BTC" in k]
+        default_val = default_keys[:1] if default_keys else [list(token_options.keys())[0]]
             
         selected_display = st.multiselect(
             "Select Tokens",
             options=list(token_options.keys()),
-            default=default_tokens[:2]
+            default=default_val
         )
 
         st.divider()
@@ -257,7 +262,7 @@ with st.sidebar:
         st.divider()
         st.subheader("Option Pricer Inputs")
         days_expiry = st.number_input("Days to Expiry", 1, 365, 30)
-        strike_dist = st.slider("Strike Distance", 0.8, 1.2, 1.0, 0.05)
+        strike_dist = st.slider("Strike Distance", 0.8, 1.2, 1.0, 0.01)
         risk_free = st.number_input("Risk Free Rate", 0.0, 1.0, 0.04, 0.01)
 
 
@@ -266,31 +271,35 @@ with st.sidebar:
 # -----------------------------------------------------------------------------
 
 if selected_display and vol_windows:
-    # Prepare timestamps
-    start_dt = datetime(start_date.year, start_date.month, start_date.day, 8, 0, 0)
-    end_dt = datetime(end_date.year, end_date.month, end_date.day, 8, 0, 0)
-    start_ms = int(time.mktime(start_dt.timetuple())) * 1000
-    end_ms = int(time.mktime(end_dt.timetuple())) * 1000
+    # --- Fix Timestamp Logic: Use UTC explicitly ---
+    # Convert dates to datetime objects at 00:00:00 UTC
+    t_start = datetime(start_date.year, start_date.month, start_date.day, tzinfo=timezone.utc)
+    t_end = datetime(end_date.year, end_date.month, end_date.day, tzinfo=timezone.utc)
+    
+    # Convert to milliseconds for Binance API
+    start_ms = int(t_start.timestamp() * 1000)
+    end_ms = int(t_end.timestamp() * 1000)
 
     for display_name in selected_display:
         base_symbol = token_options[display_name]
-        # Construct pair symbol (assume USDT for now)
+        # Construct pair symbol (Assume USDT)
         full_symbol = f"{base_symbol}USDT"
         
         st.markdown(f"## {display_name} ({market_type})")
         
         # Fetch Data
-        raw_df = get_crypto_data(full_symbol, market_type, start_time=start_ms, end_time=end_ms)
+        with st.spinner(f"Fetching data for {full_symbol}..."):
+            raw_df = get_crypto_data(full_symbol, market_type, start_time=start_ms, end_time=end_ms)
         
         if raw_df.empty:
-            st.error(f"No data found for {full_symbol} on {market_type}. Try switching market type or checking the symbol.")
+            st.warning(f"⚠️ No data returned for **{full_symbol}**. It might not exist on the {market_type} market.")
             continue
             
         # Calculate Metrics
         df_vol = calculate_hv_metrics(raw_df, vol_windows)
         
         if df_vol.empty:
-            st.warning("Not enough data to calculate volatility windows.")
+            st.warning("Not enough data points to calculate the requested volatility windows.")
             continue
             
         latest = df_vol.iloc[-1]
@@ -299,16 +308,19 @@ if selected_display and vol_windows:
         m1, m2, m3, m4 = st.columns(4)
         m1.metric("Close Price", f"${latest['close']:.4f}")
         
-        if 'rms_vol' in latest and not np.isnan(latest['rms_vol']):
-            m2.metric("RMS Vol (7,14)", f"{latest['rms_vol']*100:.1f}%")
-        else:
-            m2.metric("RMS Vol", "N/A")
+        # Safe display of RMS
+        rms_val = latest.get('rms_vol', np.nan)
+        m2.metric("RMS Vol (7,14)", f"{rms_val*100:.1f}%" if not np.isnan(rms_val) else "N/A")
             
-        if f'hv_{vol_windows[0]}' in latest:
-            m3.metric(f"{vol_windows[0]}d Vol", f"{latest[f'hv_{vol_windows[0]}']*100:.1f}%")
+        # Safe display of specific windows
+        w1 = vol_windows[0]
+        val_w1 = latest.get(f'hv_{w1}', np.nan)
+        m3.metric(f"{w1}d Vol", f"{val_w1*100:.1f}%" if not np.isnan(val_w1) else "N/A")
         
-        if len(vol_windows) > 1 and f'hv_{vol_windows[1]}' in latest:
-            m4.metric(f"{vol_windows[1]}d Vol", f"{latest[f'hv_{vol_windows[1]}']*100:.1f}%")
+        if len(vol_windows) > 1:
+            w2 = vol_windows[1]
+            val_w2 = latest.get(f'hv_{w2}', np.nan)
+            m4.metric(f"{w2}d Vol", f"{val_w2*100:.1f}%" if not np.isnan(val_w2) else "N/A")
 
         # --- Layout: Chart Left, Table/Export Right ---
         col_chart, col_data = st.columns([2, 1])
@@ -316,17 +328,19 @@ if selected_display and vol_windows:
         with col_chart:
             fig = go.Figure()
             # Add HV traces
-            colors = ['#00ff00', '#ff00ff', '#0000ff', '#ffa500']
+            colors = ['#00ff00', '#ff00ff', '#0000ff', '#ffa500', '#00ced1', '#ff4500']
+            
+            # Plot HV windows
             for i, w in enumerate(vol_windows):
                 col_name = f'hv_{w}'
                 if col_name in df_vol.columns:
                     fig.add_trace(go.Scatter(
                         x=df_vol.index, y=df_vol[col_name], 
                         name=f'{w}d HV',
-                        line=dict(width=1.5)
+                        line=dict(width=1.5, color=colors[i % len(colors)])
                     ))
             
-            # Add RMS trace if available
+            # Add RMS trace (White Dotted)
             if 'rms_vol' in df_vol.columns:
                 fig.add_trace(go.Scatter(
                     x=df_vol.index, y=df_vol['rms_vol'],
@@ -335,11 +349,12 @@ if selected_display and vol_windows:
                 ))
 
             fig.update_layout(
-                title=f"{full_symbol} Volatility Term Structure",
-                yaxis=dict(tickformat=".0%", title="Annualized Volatility"),
+                title=f"Volatility Term Structure ({full_symbol})",
+                yaxis=dict(tickformat=".1%", title="Annualized Volatility"),
                 height=450,
-                legend=dict(orientation="h", y=1.1),
-                margin=dict(l=20, r=20, t=40, b=20)
+                legend=dict(orientation="h", y=1.1, x=0),
+                margin=dict(l=20, r=20, t=40, b=20),
+                hovermode="x unified"
             )
             st.plotly_chart(fig, use_container_width=True)
 
@@ -367,7 +382,7 @@ if selected_display and vol_windows:
             csv_data = csv_buffer.getvalue()
             
             st.download_button(
-                label=f"📥 Download {full_symbol} Data (CSV)",
+                label=f"📥 Download CSV ({full_symbol})",
                 data=csv_data,
                 file_name=f"{full_symbol}_{market_type}_volatility.csv",
                 mime="text/csv",
@@ -377,21 +392,25 @@ if selected_display and vol_windows:
         # --- Option Pricer (Expander) ---
         with st.expander(f"🛠️ Option Pricer for {full_symbol}", expanded=False):
             # Use RMS vol if available, else first window
-            calc_vol = latest['rms_vol'] if 'rms_vol' in latest and not np.isnan(latest['rms_vol']) else latest[f'hv_{vol_windows[0]}']
+            calc_vol = latest.get('rms_vol', latest.get(f'hv_{vol_windows[0]}', 0.5))
+            
+            current_strike = latest['close'] * strike_dist
             
             c_price, c_delta, c_gamma, c_theta, c_vega = black_scholes(
-                latest['close'], latest['close']*strike_dist, days_expiry/365, risk_free, calc_vol, 'call'
+                latest['close'], current_strike, days_expiry/365, risk_free, calc_vol, 'call'
             )
             p_price, p_delta, p_gamma, p_theta, p_vega = black_scholes(
-                latest['close'], latest['close']*strike_dist, days_expiry/365, risk_free, calc_vol, 'put'
+                latest['close'], current_strike, days_expiry/365, risk_free, calc_vol, 'put'
             )
             
             pricer_df = pd.DataFrame({
-                "Metric": ["Price", "Delta", "Gamma", "Theta", "Vega"],
-                "Call": [c_price, c_delta, c_gamma, c_theta, c_vega],
-                "Put": [p_price, p_delta, p_gamma, p_theta, p_vega]
+                "Metric": ["Price ($)", "Delta", "Gamma", "Theta (Daily $)", "Vega (1% move $)"],
+                "Call Option": [c_price, c_delta, c_gamma, c_theta, c_vega],
+                "Put Option": [p_price, p_delta, p_gamma, p_theta, p_vega]
             })
+            
+            # Formatting table
             st.table(pricer_df.set_index("Metric"))
 
 else:
-    st.info("Please select at least one token to view data.")
+    st.info("Please select at least one token from the sidebar to view data.")
