@@ -2,11 +2,12 @@
 Historical Volatility Screener & Option Pricer
 ==============================================
 A robust dashboard for Market Makers to analyze volatility regimes.
-Supports Binance Global, Binance.US, and GeckoTerminal (DEX) for memecoins.
+Supports Binance.US (Spot), Kraken Futures (Perps), and GeckoTerminal (DEX).
 
 Features:
-- Multi-Exchange Support (Bypass Geo-blocking)
-- Spot vs Perpetual toggle (where available)
+- Kraken Futures Integration (US-Friendly Perpetuals)
+- Binance.US Support (US-Friendly Spot)
+- GeckoTerminal Support (DEX/Memecoins)
 - RMS Volatility Calculation (7/14 blending)
 - Black-Scholes Greeks Calculator
 - Bulk CSV Data Export
@@ -60,6 +61,7 @@ def get_default_assets():
         {"Coin symbol": "SHIB", "Name": "Shiba Inu", "Pool": ""},
         {"Coin symbol": "XRP", "Name": "Ripple", "Pool": ""},
         {"Coin symbol": "BNB", "Name": "Binance Coin", "Pool": ""},
+        {"Coin symbol": "ADA", "Name": "Cardano", "Pool": ""},
     ])
 
 @st.cache_data(show_spinner=False)
@@ -120,7 +122,7 @@ def fetch_binance(symbol_pair, endpoint_url, start_ms, end_ms):
         response = requests.get(endpoint_url, params=params, timeout=10)
         
         if response.status_code == 451:
-            st.error(f"🚫 Geo-Blocked: Binance Global is unavailable in your region. Switch Data Source to **Binance.US** in the sidebar.")
+            st.error(f"🚫 Geo-Blocked: Binance Global is unavailable. Switch Data Source to **Kraken Futures** or **Binance.US**.")
             return pd.DataFrame()
         elif response.status_code != 200:
             return pd.DataFrame()
@@ -141,13 +143,74 @@ def fetch_binance(symbol_pair, endpoint_url, start_ms, end_ms):
         st.error(f"Connection Error: {e}")
         return pd.DataFrame()
 
+def fetch_kraken_futures(symbol_coin, start_ms, end_ms):
+    """
+    Fetch from Kraken Futures (US Friendly Perps).
+    Kraken uses symbols like 'pf_xbtusd' (Linear) or 'pi_xbtusd' (Inverse).
+    We default to 'pf_' (Linear USD) for most, 'pf_xbtusd' for BTC.
+    """
+    # 1. Map Symbol to Kraken Format
+    s = symbol_coin.lower()
+    if s == 'btc': kraken_symbol = 'pf_xbtusd'
+    elif s == 'eth': kraken_symbol = 'pf_ethusd'
+    elif s == 'sol': kraken_symbol = 'pf_solusd'
+    elif s == 'ltc': kraken_symbol = 'pf_ltcusd'
+    elif s == 'xrp': kraken_symbol = 'pf_xrpusd'
+    elif s == 'bch': kraken_symbol = 'pf_bchusd'
+    else:
+        # Generic guess for alts (e.g., pf_dogeusd, pf_pepeusd, pf_wifusd)
+        kraken_symbol = f"pf_{s}usd"
+
+    # 2. Call API
+    # Kraken Futures Chart API v4
+    url = f"https://futures.kraken.com/derivatives/api/v4/charts/trade/{kraken_symbol}/1d"
+    
+    # Kraken often filters by time implicitly or via params, but for daily candles
+    # the public endpoint usually returns a fixed recent set (last year+).
+    # We will filter client-side if needed.
+    
+    try:
+        response = requests.get(url, timeout=10)
+        if response.status_code != 200:
+            # Try Inverse if Linear fails (sometimes older pairs are PI_)
+            if s == 'btc':
+                url_inv = f"https://futures.kraken.com/derivatives/api/v4/charts/trade/pi_xbtusd/1d"
+                response = requests.get(url_inv, timeout=10)
+            
+            if response.status_code != 200:
+                # Silent fail to let UI handle empty df
+                return pd.DataFrame()
+
+        data = response.json()
+        if 'candles' not in data:
+            return pd.DataFrame()
+            
+        candles = data['candles']
+        df = pd.DataFrame(candles)
+        # Kraken keys: time (ms), open, high, low, close, volume
+        df.rename(columns={'time': 'timestamp'}, inplace=True)
+        
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df = df.set_index('timestamp').sort_index()
+        
+        # Filter by requested date range
+        start_ts = pd.to_datetime(start_ms, unit='ms')
+        end_ts = pd.to_datetime(end_ms, unit='ms')
+        df = df[(df.index >= start_ts) & (df.index <= end_ts)]
+        
+        cols = ['open', 'high', 'low', 'close', 'volume']
+        df[cols] = df[cols].apply(pd.to_numeric, errors='coerce')
+        
+        return df[cols]
+    except Exception as e:
+        # st.error(f"Kraken Error: {e}") # Debug only
+        return pd.DataFrame()
+
 def fetch_geckoterminal(network_pool):
     """
     Fetch OHLCV from GeckoTerminal (DEX Data).
-    Format: network_address (e.g., 'eth_0x123...')
     """
     if "_" not in network_pool:
-        # Try to infer or fail gracefully
         return pd.DataFrame()
         
     network, address = network_pool.split('_', 1)
@@ -173,19 +236,12 @@ def get_crypto_data(token_meta: dict, source: str, market_type: str, start_ms: i
     """Router for different data sources."""
     symbol = token_meta['symbol']
     
-    # 1. BINANCE GLOBAL
-    if source == "Binance (Global)":
-        if market_type == "Perpetuals":
-            url = "https://fapi.binance.com/fapi/v1/klines"
-        else:
-            url = "https://api.binance.com/api/v3/klines"
-        return fetch_binance(f"{symbol}USDT", url, start_ms, end_ms)
+    # 1. KRAKEN FUTURES (PERPS)
+    if source == "Kraken Futures (Perps)":
+        return fetch_kraken_futures(symbol, start_ms, end_ms)
 
-    # 2. BINANCE US
-    elif source == "Binance.US":
-        if market_type == "Perpetuals":
-            st.warning("⚠️ Binance.US does not support Perpetuals. Switching to Spot data proxy.")
-        # Always Spot for US
+    # 2. BINANCE US (SPOT)
+    elif source == "Binance.US (Spot)":
         url = "https://api.binance.us/api/v3/klines"
         # Try USD first, then USDT
         df = fetch_binance(f"{symbol}USD", url, start_ms, end_ms)
@@ -193,11 +249,18 @@ def get_crypto_data(token_meta: dict, source: str, market_type: str, start_ms: i
             df = fetch_binance(f"{symbol}USDT", url, start_ms, end_ms)
         return df
 
-    # 3. GECKOTERMINAL (DEX)
+    # 3. BINANCE GLOBAL
+    elif source == "Binance Global":
+        if market_type == "Perpetuals":
+            url = "https://fapi.binance.com/fapi/v1/klines"
+        else:
+            url = "https://api.binance.com/api/v3/klines"
+        return fetch_binance(f"{symbol}USDT", url, start_ms, end_ms)
+
+    # 4. GECKOTERMINAL (DEX)
     elif source == "GeckoTerminal (DEX)":
         pool_info = token_meta.get('pool', '')
         if not pool_info or "_" not in pool_info:
-            st.warning(f"No pool address configured for {symbol}. Cannot fetch DEX data.")
             return pd.DataFrame()
         return fetch_geckoterminal(pool_info)
         
@@ -260,29 +323,30 @@ token_options = build_token_options(asset_df)
 with st.sidebar:
     st.header("⚙️ Configuration")
     
-    # 1. Data Source
+    # 1. Data Source (Re-ordered for US Priority)
     data_source = st.selectbox(
         "Data Source",
-        ["Binance (Global)", "Binance.US", "GeckoTerminal (DEX)"],
-        index=1,
-        help="Use Binance.US if you are in the USA. Use GeckoTerminal for memecoins."
+        [
+            "Kraken Futures (Perps)", 
+            "Binance.US (Spot)", 
+            "GeckoTerminal (DEX)", 
+            "Binance Global"
+        ],
+        index=0,
+        help="Select 'Kraken Futures' for US-accessible Perpetual data."
     )
     
-    # 2. Market Type
-    market_disabled = data_source != "Binance (Global)"
-    market_type = st.radio(
-        "Market Type", 
-        ["Spot", "Perpetuals"], 
-        index=0,
-        disabled=market_disabled,
-        help="Perpetuals only available on Binance Global."
-    )
+    # 2. Market Type (Only relevant for Binance Global)
+    if data_source == "Binance Global":
+        market_type = st.radio("Market Type", ["Spot", "Perpetuals"], index=0)
+    else:
+        st.info(f"Source set to {data_source}")
+        market_type = "Spot" # Placeholder, unused for Kraken/US logic
     
     st.divider()
     
-    # 3. Time Range (New!)
+    # 3. Time Range
     st.subheader("Data Range")
-    # Default to 1 year back, but allow user to change
     default_start = datetime.now() - timedelta(days=365)
     start_date = st.date_input("Start Date", default_start)
     end_date = st.date_input("End Date", datetime.now())
@@ -317,7 +381,7 @@ with st.sidebar:
 # -----------------------------------------------------------------------------
 
 if selected_display:
-    # Time setup using User Inputs
+    # Time setup
     start_dt_combined = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc)
     end_dt_combined = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=timezone.utc)
     
@@ -329,31 +393,39 @@ if selected_display:
 
     for display_name in selected_display:
         meta = token_options[display_name]
+        symbol = meta['symbol']
         
         st.markdown(f"### {display_name}")
         
         # 1. Get Data
-        df = get_crypto_data(meta, data_source, market_type, start_ms, end_ms)
+        with st.spinner(f"Fetching {data_source} for {symbol}..."):
+            df = get_crypto_data(meta, data_source, market_type, start_ms, end_ms)
         
         if df.empty:
-            if data_source == "GeckoTerminal (DEX)":
-                 st.info(f"No DEX data found. Configure Pool Address in CSV.")
+            if data_source == "Kraken Futures (Perps)":
+                 st.warning(f"⚠️ No Perpetual data found for **{symbol}** on Kraken. It might not be listed as a Future yet. Try switching to **Binance.US (Spot)** or **GeckoTerminal**.")
+            elif data_source == "GeckoTerminal (DEX)":
+                 st.warning(f"⚠️ No DEX data found. Ensure the Pool Address is in your CSV.")
             else:
-                 st.info(f"No data. Try switching Data Source.")
+                 st.warning(f"⚠️ No data returned. Check availability.")
             continue
             
         # 2. Calc Stats
         df_calc = calculate_volatility(df, vol_windows)
+        if df_calc.empty:
+            st.warning("Not enough history for calculation.")
+            continue
+            
         latest = df_calc.iloc[-1]
         
         # Add to collection for bulk export
         df_export_prep = df_calc.copy()
-        df_export_prep['Symbol'] = meta['symbol']
+        df_export_prep['Symbol'] = symbol
         all_data_collection.append(df_export_prep)
         
         # 3. Metrics
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Price", f"${latest['close']:,.4f}")
+        c1.metric("Close Price", f"${latest['close']:,.4f}")
         c2.metric("RMS Vol (7,14)", f"{latest['rms_vol']*100:.1f}%")
         c3.metric(f"{vol_windows[0]}d Vol", f"{latest.get(f'hv_{vol_windows[0]}', 0)*100:.1f}%")
         
@@ -363,18 +435,24 @@ if selected_display:
         with col_viz:
             fig = go.Figure()
             # Plot Volatility Curves
-            for w in vol_windows:
+            colors = ['#00ff00', '#ff00ff', '#0000ff', '#ffa500']
+            for i, w in enumerate(vol_windows):
                 if f'hv_{w}' in df_calc:
-                    fig.add_trace(go.Scatter(x=df_calc.index, y=df_calc[f'hv_{w}'], name=f'{w}d HV'))
+                    fig.add_trace(go.Scatter(
+                        x=df_calc.index, y=df_calc[f'hv_{w}'], 
+                        name=f'{w}d HV',
+                        line=dict(color=colors[i % len(colors)], width=1.5)
+                    ))
             
             # Plot RMS
             fig.add_trace(go.Scatter(
                 x=df_calc.index, y=df_calc['rms_vol'], 
-                name='RMS (Target)', line=dict(color='white', width=3, dash='dot')
+                name='RMS (Target)', 
+                line=dict(color='white', width=3, dash='dot')
             ))
             
             fig.update_layout(
-                title="Volatility Term Structure",
+                title=f"Volatility Term Structure ({data_source})",
                 yaxis_title="Annualized Volatility",
                 yaxis_tickformat='.0%',
                 height=400,
@@ -402,18 +480,17 @@ if selected_display:
             # Individual Export
             csv = df_calc.to_csv().encode('utf-8')
             st.download_button(
-                f"📥 Download {meta['symbol']} CSV",
+                f"📥 CSV ({symbol})",
                 csv,
-                f"{meta['symbol']}_vol_data.csv",
+                f"{symbol}_vol_data.csv",
                 "text/csv",
-                key=f"dl_{meta['symbol']}"
+                key=f"dl_{symbol}"
             )
 
     # --- BULK EXPORT SECTION ---
     if all_data_collection:
         st.divider()
         st.subheader("📚 Bulk Export")
-        st.write("Download historical data for ALL selected assets in one file.")
         
         # Concatenate all dataframes
         combined_df = pd.concat(all_data_collection)
@@ -426,3 +503,5 @@ if selected_display:
             "text/csv",
             key="dl_master"
         )
+else:
+    st.info("Please select assets from the sidebar.")
