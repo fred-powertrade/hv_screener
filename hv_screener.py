@@ -9,7 +9,7 @@ Features:
 - Spot vs Perpetual toggle (where available)
 - RMS Volatility Calculation (7/14 blending)
 - Black-Scholes Greeks Calculator
-- CSV Data Export
+- Bulk CSV Data Export
 """
 
 import streamlit as st
@@ -50,9 +50,9 @@ def get_default_assets():
     """Returns a robust default list if CSV is missing."""
     return pd.DataFrame([
         # Majors
-        {"Coin symbol": "BTC", "Name": "Bitcoin", "Pool": "eth_0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640"}, # WBTC/ETH pool example
+        {"Coin symbol": "BTC", "Name": "Bitcoin", "Pool": "eth_0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640"}, 
         {"Coin symbol": "ETH", "Name": "Ethereum", "Pool": "eth_0x88e6a0c2ddd26feeb64f039a2c41296fcb3f5640"},
-        {"Coin symbol": "SOL", "Name": "Solana", "Pool": "solana_HgFq..."}, # Placeholder
+        {"Coin symbol": "SOL", "Name": "Solana", "Pool": "solana_HgFq..."},
         # Mems / Alts
         {"Coin symbol": "DOGE", "Name": "Dogecoin", "Pool": ""},
         {"Coin symbol": "PEPE", "Name": "Pepe", "Pool": "eth_0xa43fe16908251ee70ef74718545e46dd2cf076d1"},
@@ -260,11 +260,11 @@ token_options = build_token_options(asset_df)
 with st.sidebar:
     st.header("⚙️ Configuration")
     
-    # 1. Data Source (CRITICAL FOR FIXING 451 ERROR)
+    # 1. Data Source
     data_source = st.selectbox(
         "Data Source",
         ["Binance (Global)", "Binance.US", "GeckoTerminal (DEX)"],
-        index=1, # Default to US to prevent error
+        index=1,
         help="Use Binance.US if you are in the USA. Use GeckoTerminal for memecoins."
     )
     
@@ -280,7 +280,19 @@ with st.sidebar:
     
     st.divider()
     
-    # 3. Asset Selector
+    # 3. Time Range (New!)
+    st.subheader("Data Range")
+    # Default to 1 year back, but allow user to change
+    default_start = datetime.now() - timedelta(days=365)
+    start_date = st.date_input("Start Date", default_start)
+    end_date = st.date_input("End Date", datetime.now())
+    
+    if start_date > end_date:
+        st.error("Start Date must be before End Date")
+    
+    st.divider()
+
+    # 4. Asset Selector
     if token_options:
         default_sel = [list(token_options.keys())[0]]
         selected_display = st.multiselect("Assets", list(token_options.keys()), default=default_sel)
@@ -288,8 +300,8 @@ with st.sidebar:
         st.error("No assets found.")
         selected_display = []
         
-    # 4. Params
-    st.subheader("Volatility Windows")
+    # 5. Params
+    st.subheader("Volatility Settings")
     windows_str = st.text_input("Days (comma sep)", "7,14,30")
     try:
         vol_windows = [int(x) for x in windows_str.split(',')]
@@ -305,11 +317,15 @@ with st.sidebar:
 # -----------------------------------------------------------------------------
 
 if selected_display:
-    # Time setup
-    end_dt = datetime.now(timezone.utc)
-    start_dt = end_dt - timedelta(days=365) # Fetch enough data
-    start_ms = int(start_dt.timestamp() * 1000)
-    end_ms = int(end_dt.timestamp() * 1000)
+    # Time setup using User Inputs
+    start_dt_combined = datetime.combine(start_date, datetime.min.time()).replace(tzinfo=timezone.utc)
+    end_dt_combined = datetime.combine(end_date, datetime.max.time()).replace(tzinfo=timezone.utc)
+    
+    start_ms = int(start_dt_combined.timestamp() * 1000)
+    end_ms = int(end_dt_combined.timestamp() * 1000)
+    
+    # List to collect all dataframes for bulk export
+    all_data_collection = []
 
     for display_name in selected_display:
         meta = token_options[display_name]
@@ -329,6 +345,11 @@ if selected_display:
         # 2. Calc Stats
         df_calc = calculate_volatility(df, vol_windows)
         latest = df_calc.iloc[-1]
+        
+        # Add to collection for bulk export
+        df_export_prep = df_calc.copy()
+        df_export_prep['Symbol'] = meta['symbol']
+        all_data_collection.append(df_export_prep)
         
         # 3. Metrics
         c1, c2, c3, c4 = st.columns(4)
@@ -378,11 +399,30 @@ if selected_display:
             
             st.table(greeks.style.format("{:.4f}"))
             
-            # Export
+            # Individual Export
             csv = df_calc.to_csv().encode('utf-8')
             st.download_button(
-                "📥 Download CSV",
+                f"📥 Download {meta['symbol']} CSV",
                 csv,
                 f"{meta['symbol']}_vol_data.csv",
-                "text/csv"
+                "text/csv",
+                key=f"dl_{meta['symbol']}"
             )
+
+    # --- BULK EXPORT SECTION ---
+    if all_data_collection:
+        st.divider()
+        st.subheader("📚 Bulk Export")
+        st.write("Download historical data for ALL selected assets in one file.")
+        
+        # Concatenate all dataframes
+        combined_df = pd.concat(all_data_collection)
+        combined_csv = combined_df.to_csv().encode('utf-8')
+        
+        st.download_button(
+            "📥 Download All Combined Data (CSV)",
+            combined_csv,
+            "volatility_dashboard_master.csv",
+            "text/csv",
+            key="dl_master"
+        )
