@@ -1,3 +1,32 @@
+"""
+Historical Volatility Screener (Spot & Futures)
+===============================================
+
+This updated Streamlit app allows users to screen historical volatility (HV) for a
+curated list of crypto assets. It now supports switching between **Binance Spot**
+and **Binance USDT-M Futures (Perps)** data.
+
+New Features
+------------
+* **Market Type Selector**: Toggle between 'Spot' and 'Futures' (Perps) in the sidebar.
+  The app dynamically switches API endpoints (Binance Spot vs Binance FAPI).
+* **Data Export**: A download button is available below the data table to export
+  the calculated volatility metrics to a CSV file.
+
+Standard Features
+-----------------
+* **Asset filtering** via `asset list.csv`.
+* **Custom HV windows** (e.g., 7, 14, 30 days).
+* **Normalised RMS metrics** (RMS of 7&14, 2&3).
+* **Tenor comparison chart**.
+* **Interactive Option Pricer**.
+
+Usage
+-----
+Ensure `asset list.csv` is in the same directory.
+Run with: `streamlit run app.py`
+"""
+
 import streamlit as st
 import pandas as pd
 import numpy as np
@@ -6,346 +35,411 @@ import plotly.graph_objects as go
 from scipy.stats import norm
 from datetime import datetime, timedelta
 import time
-import io  # For CSV buffering
+import os
 
-# ==========================================
-# 1. CONFIGURATION & PAGE SETUP
-# ==========================================
-st.set_page_config(layout="wide", page_title="MM Volatility Dashboard")
+# -----------------------------------------------------------------------------
+# 1. PAGE CONFIGURATION
+# -----------------------------------------------------------------------------
 
-st.title("⚡ Dynamic Volatility Dashboard (RMS Model)")
-st.markdown("""
-**Strategy:** Market Maker (MM) Risk Engine for Volatile Markets (e.g., Memecoins/Altcoins)  
-**Metric:** Root Mean Square (RMS) of Custom Historical Volatility Windows  
-**Customizable:** By date range, token, data source (CoinGecko, Kraken Futures, Binance Perpetuals), vol windows. With export options for historical data.
-""")
+st.set_page_config(
+    layout="wide",
+    page_title="Historical Volatility Screener",
+    page_icon="📉",
+)
 
-# ==========================================
-# 2. DATA ENGINE (Multi-source)
-# ==========================================
-@st.cache_data(ttl=600)
-def get_crypto_data(source, symbol, start_time=None, end_time=None, days=90):
-    df = pd.DataFrame()
+st.title("📉 Historical Volatility Screener")
+st.markdown(
+    """
+    **Market Maker Volatility Engine**
     
-    if source == "Binance Perpetuals":
-        base_url = f"https://fapi.binance.com/fapi/v1/klines?symbol={symbol}&interval=1d&limit=1000"
-        if start_time:
-            base_url += f"&startTime={start_time}"
-        if end_time:
-            base_url += f"&endTime={end_time}"
-        try:
-            response = requests.get(base_url)
-            if response.status_code == 200:
-                data = response.json()
-                df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time', 'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume', 'taker_buy_quote_asset_volume', 'ignore'])
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                df = df.set_index('timestamp').sort_index()
-                df = df[['open', 'high', 'low', 'close', 'volume']].astype(float)
-        except:
-            pass
-    
-    elif source == "CoinGecko":
-        base_url = f"https://api.coingecko.com/api/v3/coins/{symbol}/ohlc?vs_currency=usd&days={days}"
-        try:
-            response = requests.get(base_url)
-            if response.status_code == 200:
-                data = response.json()
-                df = pd.DataFrame(data, columns=['timestamp', 'open', 'high', 'low', 'close'])
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-                df = df.set_index('timestamp').sort_index()
-                df['volume'] = np.nan  # CoinGecko OHLC doesn't include volume
-        except:
-            pass
-    
-    elif source == "Kraken Futures":
-        base_url = f"https://futures.kraken.com/derivatives/api/v3/history?symbol={symbol}&resolution=1D"
-        if start_time:
-            base_url += f"&from={start_time}"
-        if end_time:
-            base_url += f"&to={end_time}"
-        try:
-            response = requests.get(base_url)
-            if response.status_code == 200:
-                data = response.json()
-                if 'history' in data['result']:
-                    hist = data['result']['history']
-                    df = pd.DataFrame(hist)
-                    df['timestamp'] = pd.to_datetime(df['time'], unit='ms')
-                    df = df.set_index('timestamp').sort_index()
-                    df = df[['open', 'high', 'low', 'close', 'volume']]
-        except:
-            pass
-    
-    if df.empty:
-        st.warning(f"No data for {symbol} on {source}. Check symbol availability.")
-    return df
+    Select your asset and market type (Spot or Perps) to analyze realized volatility regimes. 
+    Use the RMS metrics to price inventory risk and the export function to download data for offline modeling.
+    """
+)
 
-@st.cache_data(ttl=600)
-def get_spot_price(source, symbol):
-    price = None
-    
-    if source == "Binance Perpetuals":
-        url = f"https://fapi.binance.com/fapi/v1/premiumIndex?symbol={symbol}"
-        try:
-            response = requests.get(url)
-            if response.status_code == 200:
-                price = float(response.json()['markPrice'])
-        except:
-            pass
-    
-    elif source == "CoinGecko":
-        url = f"https://api.coingecko.com/api/v3/simple/price?ids={symbol}&vs_currencies=usd"
-        try:
-            response = requests.get(url)
-            if response.status_code == 200:
-                price = response.json()[symbol]['usd']
-        except:
-            pass
-    
-    elif source == "Kraken Futures":
-        url = f"https://futures.kraken.com/derivatives/api/v3/ticker?symbol={symbol}"
-        try:
-            response = requests.get(url)
-            if response.status_code == 200:
-                price = response.json()['result']['last']
-        except:
-            pass
-    
-    return price
+# -----------------------------------------------------------------------------
+# 2. ASSET LIST LOADING
+# -----------------------------------------------------------------------------
 
-@st.cache_data(ttl=600)
-def get_implied_vol(currency='BTC'):
+@st.cache_data(show_spinner=False)
+def load_asset_list(csv_path: str) -> pd.DataFrame:
     try:
-        url = "https://www.deribit.com/api/v2/public/get_volatility_index_data"
-        now_ms = int(time.time() * 1000)
-        params = {
-            "currency": currency,
-            "start_timestamp": now_ms - 3600 * 1000,
-            "end_timestamp": now_ms,
-            "resolution": "3600"
-        }
+        if not os.path.exists(csv_path):
+            # Fallback for demo purposes if file is missing
+            return pd.DataFrame()
+        df = pd.read_csv(csv_path)
+        return df.fillna("")
+    except Exception as exc:
+        st.error(f"Failed to load asset list: {exc}")
+        return pd.DataFrame()
+
+def build_token_options(df: pd.DataFrame) -> dict:
+    options = {}
+    for _, row in df.iterrows():
+        coin = str(row.get("Coin symbol", "")).strip().upper()
+        if not coin:
+            continue
+        common = str(row.get("Common Name", "")).strip()
+        display = f"{coin} - {common}" if common else coin
+        if display not in options:
+            options[display] = f"{coin}USDT"
+    return options
+
+# -----------------------------------------------------------------------------
+# 3. DATA FETCHING UTILITIES (UPDATED FOR SPOT/PERPS)
+# -----------------------------------------------------------------------------
+
+@st.cache_data(ttl=600, show_spinner=False)
+def get_crypto_data(symbol: str, market_type: str, interval: str = "1d", 
+                   start_time: int | None = None, end_time: int | None = None, 
+                   limit: int = 1000) -> pd.DataFrame:
+    """
+    Fetch historical OHLCV data from Binance (Spot or Futures).
+    """
+    # Switch URL based on market type
+    if market_type == 'spot':
+        base_url = "[https://api.binance.com/api/v3/klines](https://api.binance.com/api/v3/klines)"
+    else: # perps
+        base_url = "[https://fapi.binance.com/fapi/v1/klines](https://fapi.binance.com/fapi/v1/klines)"
+
+    params = {
+        'symbol': symbol,
+        'interval': interval,
+        'limit': limit,
+    }
+    if start_time is not None:
+        params = int(start_time)
+    if end_time is not None:
+        params = int(end_time)
+        
+    try:
+        response = requests.get(base_url, params=params)
+        if response.status_code!= 200:
+            return pd.DataFrame()
+            
+        data = response.json()
+        if not data or not isinstance(data, list):
+            return pd.DataFrame()
+            
+        # Structure is identical for Spot and Futures
+        df = pd.DataFrame(
+            data,
+            columns=[
+                'timestamp', 'open', 'high', 'low', 'close', 'volume', 'close_time',
+                'quote_asset_volume', 'number_of_trades', 'taker_buy_base_asset_volume',
+                'taker_buy_quote_asset_volume', 'ignore'
+            ],
+        )
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df = df.set_index('timestamp').sort_index()
+        return df[['open', 'high', 'low', 'close', 'volume']].astype(float)
+    except Exception:
+        return pd.DataFrame()
+
+@st.cache_data(ttl=60, show_spinner=False)
+def get_current_price(symbol: str, market_type: str) -> float | None:
+    """Get the latest price from Binance (Spot or Futures)."""
+    try:
+        if market_type == 'spot':
+            url = f"[https://api.binance.com/api/v3/ticker/price?symbol=](https://api.binance.com/api/v3/ticker/price?symbol=){symbol}"
+        else:
+            url = f"[https://fapi.binance.com/fapi/v1/ticker/price?symbol=](https://fapi.binance.com/fapi/v1/ticker/price?symbol=){symbol}"
+            
+        response = requests.get(url)
+        if response.status_code == 200:
+            return float(response.json()['price'])
+        return None
+    except Exception:
+        return None
+
+@st.cache_data(ttl=600, show_spinner=False)
+def get_implied_vol(currency: str = 'BTC') -> float | None:
+    """Fetch DVOL from Deribit (BTC/ETH only)."""
+    url = "[https://www.deribit.com/api/v2/public/get_volatility_index_data](https://www.deribit.com/api/v2/public/get_volatility_index_data)"
+    now_ms = int(time.time() * 1000)
+    params = {
+        "currency": currency,
+        "start_timestamp": now_ms - 3600 * 1000,
+        "end_timestamp": now_ms,
+        "resolution": "3600",
+    }
+    try:
         response = requests.get(url, params=params)
         data = response.json()
         if 'result' in data and 'data' in data['result'] and data['result']['data']:
-            return data['result']['data'][-1][4]
-        return None
-    except:
-        return None
+            return data['result']['data'][-1][1]
+    except Exception:
+        pass
+    return None
 
-# ==========================================
-# 3. MATHEMATICAL ENGINE
-# ==========================================
-def calculate_metrics(df, vol_windows=[2, 3, 7, 14, 30, 60, 90]):
+# -----------------------------------------------------------------------------
+# 4. MATHEMATICAL ENGINE
+# -----------------------------------------------------------------------------
+
+def calculate_hv_metrics(df: pd.DataFrame, vol_windows: list[int]) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame()
     if len(df) < max(vol_windows) + 1:
         return pd.DataFrame()
-    
+        
+    df = df.copy()
     df['log_ret'] = np.log(df['close'] / df['close'].shift(1))
-    
-    ANNUAL_FACTOR = np.sqrt(365)
+    annual_factor = np.sqrt(365)
     
     for w in vol_windows:
-        df[f'hv_{w}'] = df['log_ret'].rolling(window=w).std() * ANNUAL_FACTOR
-    
+        df[f'hv_{w}'] = df['log_ret'].rolling(window=w).std() * annual_factor
+        
+    # Normalised RMS Calculations
     if 2 in vol_windows and 3 in vol_windows:
         df['normalized_23'] = np.sqrt((df['hv_2']**2 + df['hv_3']**2) / 2)
     if 7 in vol_windows and 14 in vol_windows:
         df['normalized_714'] = np.sqrt((df['hv_7']**2 + df['hv_14']**2) / 2)
-    
-    df['rms_vol'] = df['normalized_714'] if 'normalized_714' in df else np.nan
-    
+        
+    # Representative RMS for UI
+    df['rms_vol'] = df['normalized_714'] if 'normalized_714' in df.columns else np.nan
     return df.dropna()
 
-# ==========================================
-# 4. BLACK-SCHOLES PRICER
-# ==========================================
 def black_scholes(S, K, T, r, sigma, option_type='call'):
-    if T <= 0:
-        return 0.0, 0.0, 0.0, 0.0, 0.0
-
+    if T <= 0 or sigma <= 0 or S <= 0 or K <= 0:
+        return (0.0, 0.0, 0.0, 0.0, 0.0)
+        
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
     
     if option_type == 'call':
         price = S * norm.cdf(d1) - K * np.exp(-r * T) * norm.cdf(d2)
         delta = norm.cdf(d1)
-        term1 = - (S * norm.pdf(d1) * sigma) / (2 * np.sqrt(T))
-        term2 = - r * K * np.exp(-r * T) * norm.cdf(d2)
-        theta = (term1 + term2) / 365
+        theta = (- (S * norm.pdf(d1) * sigma) / (2 * np.sqrt(T)) - r * K * np.exp(-r * T) * norm.cdf(d2)) / 365
     else:
         price = K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
         delta = norm.cdf(d1) - 1
-        term1 = - (S * norm.pdf(d1) * sigma) / (2 * np.sqrt(T))
-        term2 = r * K * np.exp(-r * T) * norm.cdf(-d2)
-        theta = (term1 + term2) / 365
-
+        theta = (- (S * norm.pdf(d1) * sigma) / (2 * np.sqrt(T)) + r * K * np.exp(-r * T) * norm.cdf(-d2)) / 365
+        
     gamma = norm.pdf(d1) / (S * sigma * np.sqrt(T))
-    vega = S * norm.pdf(d1) * np.sqrt(T) / 100 
+    vega = S * norm.pdf(d1) * np.sqrt(T) / 100
     
-    return price, delta, gamma, theta, vega
+    return (price, delta, gamma, theta, vega)
 
-# ==========================================
-# 5. USER INTERFACE LAYOUT
-# ==========================================
+# -----------------------------------------------------------------------------
+# 5. USER INTERFACE
+# -----------------------------------------------------------------------------
+
+# Load assets
+asset_csv_path = 'asset list.csv' # Assumes file is in same directory
+asset_df = load_asset_list(asset_csv_path)
+token_options = build_token_options(asset_df)
+
 with st.sidebar:
     st.header("🔧 Settings")
     
-    # Source selector
-    source = st.selectbox("Data Source", ["Binance Perpetuals", "CoinGecko", "Kraken Futures"])
+    # 1. Market Type Selector (Spot vs Perps)
+    market_mode = st.radio(
+        "Market Source", 
+       ,
+        index=0,
+        help="Switch between Binance Spot and USDT-M Perpetual Futures."
+    )
+    market_type = 'spot' if market_mode == 'Spot' else 'perps'
     
-    # Token selector
-    token_options = {
-        "Bitcoin": {"Binance Perpetuals": "BTCUSDT", "CoinGecko": "bitcoin", "Kraken Futures": "PF_XBTUSD"},
-        "Ethereum": {"Binance Perpetuals": "ETHUSDT", "CoinGecko": "ethereum", "Kraken Futures": "PF_ETHUSD"},
-        "PEPE": {"Binance Perpetuals": "PEPEUSDT", "CoinGecko": "pepe", "Kraken Futures": "PF_PEPEUSD"}
-    }
-    selected_token = st.selectbox("Select Token", list(token_options.keys()))
-    symbol = token_options[selected_token][source]
+    # 2. Token Selection
+    default_tokens =
+    for name in:
+        for k in token_options.keys():
+            if k.startswith(name):
+                default_tokens.append(k)
+                break
+                
+    selected_display = st.multiselect(
+        "Select Tokens (max 5)",
+        options=list(token_options.keys()),
+        default=default_tokens,
+        max_selections=5
+    )
     
+    # 3. Date & Windows
     st.divider()
+    today = datetime.now().date()
+    default_start = today - timedelta(days=180)
+    start_date = st.date_input("Start Date", value=default_start, max_value=today)
+    end_date = st.date_input("End Date", value=today, min_value=start_date, max_value=today)
     
-    # Date customization
-    today = datetime.today()
-    end_date = st.date_input("End Date", value=today)
-    start_date = st.date_input("Start Date", value=today - timedelta(days=90))
-    if start_date > end_date:
-        st.error("Start date must be before end date.")
+    windows_input = st.text_input("HV Windows (days)", value="2,3,7,14,30,60,90")
+    vol_windows = sorted(list(set([int(x.strip()) for x in windows_input.split(',') if x.strip().isdigit()])))
     
-    start_time = int(time.mktime(start_date.timetuple())) * 1000
-    end_time = int(time.mktime(end_date.timetuple())) * 1000
-    days_range = (end_date - start_date).days + 1
-    
-    # Vol windows
-    vol_windows_str = st.text_input("Vol Windows (comma-separated days)", value="2,3,7,14,30,60,90")
-    vol_windows = [int(w.strip()) for w in vol_windows_str.split(',') if w.strip().isdigit()]
-    
+    # 4. Tenor Comparison
     st.divider()
+    st.subheader("Comparison Settings")
+    tenor1 = st.selectbox("Short Tenor", vol_windows, index=0 if vol_windows else 0)
+    tenor2 = st.selectbox("Long Tenor", vol_windows, index=1 if len(vol_windows)>1 else 0)
     
-    st.subheader("Option Pricing Inputs")
-    strike_min_pct, strike_max_pct = st.slider("Strike Distance Range (%)", 0.5, 2.0, (0.8, 1.2), 0.01)
-    days_expiry = st.number_input("Days to Expiry", min_value=1, value=30)
+    # 5. Pricer Settings
+    st.divider()
+    st.subheader("Pricer Inputs")
+    days_expiry = st.number_input("Days to Expiry", 1, 365, 30)
+    strike_pct = st.slider("Strike Range (%)", 0.5, 1.5, (0.8, 1.2), 0.05)
     risk_free = st.number_input("Risk Free Rate", value=0.05)
-    
-    # Optional: Upload pricer file
-    uploaded_file = st.file_uploader("Upload Options Pricer File (CSV/Excel)", type=['csv', 'xlsx'])
-    if uploaded_file:
-        try:
-            df_upload = pd.read_excel(uploaded_file) if uploaded_file.name.endswith('xlsx') else pd.read_csv(uploaded_file)
-            st.info(f"Loaded {len(df_upload)} rows. Customize as needed.")
-        except:
-            st.warning("Couldn't read file.")
 
-# Fetch and process data for selected token
-raw_df = get_crypto_data(source, symbol, start_time=start_time, end_time=end_time, days=days_range)
-if not raw_df.empty:
-    processed_df = calculate_metrics(raw_df, vol_windows)
+# -----------------------------------------------------------------------------
+# 6. MAIN LOGIC
+# -----------------------------------------------------------------------------
+
+if selected_display and vol_windows:
+    start_dt = datetime(start_date.year, start_date.month, start_date.day, 8, 0)
+    end_dt = datetime(end_date.year, end_date.month, end_date.day, 8, 0)
+    start_ms = int(time.mktime(start_dt.timetuple()) * 1000)
+    end_ms = int(time.mktime(end_dt.timetuple()) * 1000)
     
-    if len(processed_df) > 0:
+    for display_name in selected_display:
+        symbol = token_options.get(display_name)
+        if not symbol: continue
+        
+        st.markdown(f"---")
+        st.markdown(f"## {display_name} ({market_mode})")
+        
+        # Fetch Data
+        raw_df = get_crypto_data(symbol, market_type, start_time=start_ms, end_time=end_ms)
+        
+        if raw_df.empty:
+            st.warning(f"No data found for {symbol} on Binance {market_mode}. It might not be listed.")
+            continue
+            
+        processed_df = calculate_hv_metrics(raw_df, vol_windows)
+        
+        if processed_df.empty:
+            st.warning("Not enough data to calculate volatility.")
+            continue
+            
         latest = processed_df.iloc[-1]
-        spot_price = get_spot_price(source, symbol)
+        current_price = get_current_price(symbol, market_type) or latest['close']
         
-        # Implied Vol (only for BTC/ETH)
-        iv = None
-        if selected_token in ["Bitcoin", "Ethereum"]:
-            deribit_currency = 'BTC' if selected_token == "Bitcoin" else 'ETH'
-            iv = get_implied_vol(deribit_currency)
+        # Metrics Row
+        m1, m2, m3, m4, m5 = st.columns(5)
+        m1.metric("Price", f"${current_price:,.4f}")
+        m2.metric("RMS (7,14)", f"{latest.get('normalized_714', 0):.2%}")
+        m3.metric("RMS (2,3)", f"{latest.get('normalized_23', 0):.2%}")
+        m4.metric(f"{tenor1}d Vol", f"{latest.get(f'hv_{tenor1}', 0):.2%}")
+        m5.metric(f"{tenor2}d Vol", f"{latest.get(f'hv_{tenor2}', 0):.2%}")
         
-        # Key Metrics
-        col1, col2, col3, col4, col5 = st.columns(5)
-        col1.metric("Spot Price Today", f"${spot_price:.2f}" if spot_price else "N/A")
-        col2.metric("RMS Vol (7,14)", f"{latest['rms_vol']*100:.2f}%" if 'rms_vol' in latest else "N/A")
-        col3.metric("Normalized (2/3)", f"{latest['normalized_23']*100:.2f}%" if 'normalized_23' in latest else "N/A")
-        col4.metric("Normalized (7/14)", f"{latest['normalized_714']*100:.2f}%" if 'normalized_714' in latest else "N/A")
-        col5.metric("Expected IV (30d Deribit)", f"{iv:.2f}%" if iv else "N/A")
+        # Charts & Table Layout
+        c_chart, c_table = st.columns([2, 3])
         
-        # HV Table
-        st.subheader("Historical Volatility Table")
-        table_columns = ['close'] + ['normalized_23', 'normalized_714'] + [f'hv_{w}' for w in sorted(vol_windows)]
-        if all(col in processed_df.columns for col in table_columns):
-            table_df = processed_df[table_columns]
-            table_df = table_df.iloc[-20:].reset_index()
-            table_df.columns = ['dt', 'close', 'normalized(2/3)', 'normalized(7/14)'] + [f'hv_{w}' for w in sorted(vol_windows)]
-            st.dataframe(table_df)
-        else:
-            st.warning("Insufficient vol windows for table.")
-        
-        # Visualization
-        st.subheader("📈 Historical Volatility Chart (Past HV)")
-        fig = go.Figure()
-        colors = ['blue', 'green', 'red', 'purple', 'orange', 'cyan', 'magenta']
-        for i, w in enumerate(vol_windows):
-            if f'hv_{w}' in processed_df:
-                fig.add_trace(go.Scatter(x=processed_df.index, y=processed_df[f'hv_{w}'],
-                                         name=f'HV {w}d', line=dict(color=colors[i % len(colors)])))
-        if 'normalized_23' in processed_df:
-            fig.add_trace(go.Scatter(x=processed_df.index, y=processed_df['normalized_23'],
-                                     name='Normalized (2/3)', line=dict(color='black', dash='dash')))
-        if 'normalized_714' in processed_df:
-            fig.add_trace(go.Scatter(x=processed_df.index, y=processed_df['normalized_714'],
-                                     name='Normalized (7/14)', line=dict(color='gray', dash='dash')))
-        
-        fig.update_layout(
-            yaxis=dict(title="Volatility", tickformat='.0%'),
-            height=500,
-            title=f"{selected_token} Historical Volatility Regimes ({source})"
-        )
-        st.plotly_chart(fig, use_container_width=True)
-        
-        # Option Pricer
-        st.subheader("🛠️ Market Maker Inventory Pricer (Shadow Options)")
-        current_spot = spot_price if spot_price else latest['close']
-        time_years = days_expiry / 365.0
-        rms_vol = latest['rms_vol'] if 'rms_vol' in latest else 0.0
-        
-        pricer_data = {"Metric": ["Price", "Delta", "Gamma", "Theta", "Vega"]}
-        for strike_pct in np.linspace(strike_min_pct, strike_max_pct, 3):
-            target_strike = current_spot * strike_pct
-            c_price, c_delta, c_gamma, c_theta, c_vega = black_scholes(current_spot, target_strike, time_years, risk_free, rms_vol, 'call')
-            p_price, p_delta, p_gamma, p_theta, p_vega = black_scholes(current_spot, target_strike, time_years, risk_free, rms_vol, 'put')
+        with c_chart:
+            # Main Volatility Chart
+            fig = go.Figure()
+            colors = ['#1f77b4', '#ff7f0e', '#2ca02c', '#d62728', '#9467bd']
             
-            col_name = f"Call ({strike_pct:.2f}x Spot)"
-            pricer_data[col_name] = [f"{c_price:.4f}", f"{c_delta:.4f}", f"{c_gamma:.4f}", f"{c_theta:.4f}", f"{c_vega:.4f}"]
+            # Plot user selected windows
+            for idx, w in enumerate(vol_windows):
+                if w in : # Show standard ones by default
+                    fig.add_trace(go.Scatter(
+                        x=processed_df.index, y=processed_df[f'hv_{w}'],
+                        name=f'{w}d HV', line=dict(width=1.5)
+                    ))
             
-            col_name = f"Put ({strike_pct:.2f}x Spot)"
-            pricer_data[col_name] = [f"{p_price:.4f}", f"{p_delta:.4f}", f"{p_gamma:.4f}", f"{p_theta:.4f}", f"{p_vega:.4f}"]
-        
-        st.table(pd.DataFrame(pricer_data).set_index("Metric"))
-        
-        # Export for selected token
-        csv_buffer = io.StringIO()
-        processed_df.to_csv(csv_buffer)
-        st.download_button(
-            label="Download Historical Data for Selected Token",
-            data=csv_buffer.getvalue(),
-            file_name=f"historical_vol_{selected_token}_{source}.csv",
-            mime="text/csv"
-        )
-    else:
-        st.warning(f"Not enough data for {selected_token} (need at least {max(vol_windows) + 1} days).")
-else:
-    st.warning("No data found.")
+            # Highlight RMS
+            if 'normalized_714' in processed_df.columns:
+                fig.add_trace(go.Scatter(
+                    x=processed_df.index, y=processed_df['normalized_714'],
+                    name='RMS (7,14)', line=dict(color='white', width=3, dash='dot')
+                ))
+                
+            fig.update_layout(
+                title=f"Volatility Structure ({market_mode})",
+                yaxis=dict(tickformat='.0%', title="Annualized Volatility"),
+                height=450,
+                legend=dict(orientation="h", y=1.1),
+                margin=dict(l=10, r=10, t=40, b=10)
+            )
+            st.plotly_chart(fig, use_container_width=True)
+            
+            # Tenor Comparison Chart
+            if tenor1!= tenor2:
+                fig_spread = go.Figure()
+                fig_spread.add_trace(go.Scatter(
+                    x=processed_df.index, y=processed_df[f'hv_{tenor1}'], 
+                    name=f'{tenor1}d', line=dict(color='cyan')
+                ))
+                fig_spread.add_trace(go.Scatter(
+                    x=processed_df.index, y=processed_df[f'hv_{tenor2}'], 
+                    name=f'{tenor2}d', line=dict(color='magenta')
+                ))
+                # Spread
+                spread = processed_df[f'hv_{tenor1}'] - processed_df[f'hv_{tenor2}']
+                fig_spread.add_trace(go.Scatter(
+                    x=processed_df.index, y=spread, 
+                    name='Spread', line=dict(color='yellow', width=1), yaxis='y2'
+                ))
+                
+                fig_spread.update_layout(
+                    title=f"Term Structure Spread ({tenor1}d vs {tenor2}d)",
+                    height=300,
+                    yaxis=dict(tickformat='.0%'),
+                    yaxis2=dict(title="Spread", overlaying='y', side='right', tickformat='.2%'),
+                    margin=dict(l=10, r=10, t=40, b=10),
+                    showlegend=True
+                )
+                st.plotly_chart(fig_spread, use_container_width=True)
 
-# Export for all tokens
-if st.button("Export Historical Data for All Tokens"):
-    all_dfs = []
-    for tok in token_options.keys():
-        sym = token_options[tok][source]
-        raw = get_crypto_data(source, sym, start_time=start_time, end_time=end_time, days=days_range)
-        if not raw.empty:
-            proc = calculate_metrics(raw, vol_windows)
-            if not proc.empty:
-                proc['token'] = tok
-                proc['source'] = source
-                all_dfs.append(proc)
-    
-    if all_dfs:
-        combined_df = pd.concat(all_dfs)
-        csv_buffer_all = io.StringIO()
-        combined_df.to_csv(csv_buffer_all)
-        st.download_button(
-            label="Download All Tokens Data",
-            data=csv_buffer_all.getvalue(),
-            file_name=f"all_historical_vol_{source}.csv",
-            mime="text/csv"
-        )
-    else:
-        st.error("No data available for any tokens.")
+        with c_table:
+            st.subheader("Historical Data")
+            
+            # Prepare Table
+            display_cols = ['close']
+            if 'normalized_714' in processed_df.columns: display_cols.append('normalized_714')
+            display_cols += [f'hv_{w}' for w in vol_windows[:4]] # Show first 4 windows to save space
+            
+            table_df = processed_df[display_cols].copy().sort_index(ascending=False)
+            
+            # Format for display
+            fmt_df = table_df.copy()
+            for col in fmt_df.columns:
+                if 'hv' in col or 'normalized' in col:
+                    fmt_df[col] = fmt_df[col].apply(lambda x: f"{x:.2%}")
+                else:
+                    fmt_df[col] = fmt_df[col].apply(lambda x: f"{x:.4f}")
+            
+            st.dataframe(fmt_df, height=600, use_container_width=True)
+            
+            # Export Button
+            csv_data = table_df.to_csv().encode('utf-8')
+            filename = f"{symbol}_{market_mode}_Volatility.csv"
+            
+            st.download_button(
+                label="📥 Export Data to CSV",
+                data=csv_data,
+                file_name=filename,
+                mime='text/csv',
+                key=f"dl_{symbol}"
+            )
+
+        # 7. Options Pricer Integration
+        with st.expander("🛠️ Market Maker Option Pricer", expanded=False):
+            st.write("Pricing theoretical options based on current RMS Volatility")
+            
+            vol_input = latest.get('normalized_714', 0.5)
+            t_years = days_expiry / 365.0
+            
+            strikes = np.linspace(strike_pct, strike_pct[3], 5)
+            pricer_rows =
+            
+            for k_pct in strikes:
+                K = current_price * k_pct
+                # Call
+                c_price, c_delta, c_gamma, c_theta, c_vega = black_scholes(current_price, K, t_years, risk_free, vol_input, 'call')
+                # Put
+                p_price, p_delta, p_gamma, p_theta, p_vega = black_scholes(current_price, K, t_years, risk_free, vol_input, 'put')
+                
+                pricer_rows.append({
+                    "Strike": f"${K:,.2f} ({k_pct:.0%})",
+                    "Call Price": f"{c_price:.2f}",
+                    "Call Delta": f"{c_delta:.2f}",
+                    "Put Price": f"{p_price:.2f}",
+                    "Put Delta": f"{p_delta:.2f}",
+                    "Vega": f"{c_vega:.2f}",
+                    "Theta": f"{c_theta:.2f}"
+                })
+            
+            st.table(pd.DataFrame(pricer_rows))
+
+else:
+    st.info("👈 Select tokens and configure windows in the sidebar to start.")
